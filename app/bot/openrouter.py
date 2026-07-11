@@ -1,6 +1,7 @@
 import asyncio
 import json
 import time
+from typing import Any
 
 import httpx
 
@@ -18,7 +19,19 @@ FALLBACK_MODELS = [
     "openrouter/free",
 ]
 
-MODERATION_SYSTEM_PROMPT = """You moderate messages in a Telegram group chat. \
+# Models exposed in the dashboard's AI configuration picker.
+AVAILABLE_MODELS = [
+    ("meta-llama/llama-3.3-70b-instruct:free", "Llama 3.3 70B (free)"),
+    ("openai/gpt-oss-20b:free", "GPT-OSS 20B (free)"),
+    ("openrouter/free", "OpenRouter Free Router"),
+    ("google/gemini-2.0-flash-exp:free", "Gemini 2.0 Flash (free)"),
+    ("mistralai/mistral-small-3.1-24b-instruct:free", "Mistral Small 3.1 (free)"),
+    ("qwen/qwen3-14b:free", "Qwen 3 14B (free)"),
+    ("deepseek/deepseek-chat-v3-0324:free", "DeepSeek Chat v3 (free)"),
+    ("meta-llama/llama-3.1-8b-instruct:free", "Llama 3.1 8B (free)"),
+]
+
+DEFAULT_MODERATION_SYSTEM_PROMPT = """You moderate messages in a Telegram group chat. \
 Respond with ONLY a JSON object, no other text, no markdown fences:
 {"category": "none|spam|toxicity|threat|scam_link|other", \
 "severity": "none|low|medium|high", "confidence": 0.0-1.0}
@@ -47,6 +60,9 @@ class RateLimiter:
         self.period = period_seconds
         self._calls: list[float] = []
         self._lock = asyncio.Lock()
+        # Light stats so the dashboard can show "AI calls in the last minute".
+        self.total_calls = 0
+        self.total_failures = 0
 
     async def acquire(self) -> None:
         async with self._lock:
@@ -59,6 +75,18 @@ class RateLimiter:
                 now = time.monotonic()
                 self._calls = [t for t in self._calls if now - t < self.period]
             self._calls.append(time.monotonic())
+            self.total_calls += 1
+
+    def snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        recent = sum(1 for t in self._calls if now - t < self.period)
+        return {
+            "calls_last_period": recent,
+            "max_per_period": self.max_calls,
+            "period_seconds": self.period,
+            "total_calls": self.total_calls,
+            "total_failures": self.total_failures,
+        }
 
 
 # Stays comfortably under the ~20 req/min ceiling most free OpenRouter models
@@ -66,7 +94,11 @@ class RateLimiter:
 _rate_limiter = RateLimiter(max_calls=15, period_seconds=60)
 
 
-async def _call(messages: list[dict], models: list[str] = FALLBACK_MODELS) -> str:
+def rate_limiter_snapshot() -> dict[str, Any]:
+    return _rate_limiter.snapshot()
+
+
+async def _call(messages: list[dict], models: list[str] = FALLBACK_MODELS, temperature: float = 0.2) -> str:
     await _rate_limiter.acquire()
 
     last_error: Exception | None = None
@@ -76,25 +108,28 @@ async def _call(messages: list[dict], models: list[str] = FALLBACK_MODELS) -> st
                 resp = await client.post(
                     OPENROUTER_URL,
                     headers={"Authorization": f"Bearer {settings.openrouter_api_key}"},
-                    json={"model": model, "messages": messages},
+                    json={"model": model, "messages": messages, "temperature": temperature},
                 )
                 resp.raise_for_status()
                 return resp.json()["choices"][0]["message"]["content"]
             except Exception as exc:  # noqa: BLE001 — deliberately broad, we fall back
                 last_error = exc
+                _rate_limiter.total_failures += 1
                 continue
     raise RuntimeError(f"All OpenRouter models failed: {last_error}")
 
 
-async def classify_message(text: str) -> dict:
+async def classify_message(text: str, system_prompt: str | None = None, temperature: float = 0.2) -> dict:
     """Runs automatically on every message that passes the cheap regex
     filters first (see bot/moderation.py) — kept for the ambiguous cases
     only, given free-model rate limits."""
+    prompt = system_prompt or DEFAULT_MODERATION_SYSTEM_PROMPT
     raw = await _call(
         [
-            {"role": "system", "content": MODERATION_SYSTEM_PROMPT},
+            {"role": "system", "content": prompt},
             {"role": "user", "content": text},
-        ]
+        ],
+        temperature=temperature,
     )
     try:
         return json.loads(raw)
@@ -128,4 +163,23 @@ async def admin_tool(prompt: str, system: str = "You are a helpful Telegram grou
             {"role": "system", "content": system},
             {"role": "user", "content": prompt},
         ]
+    )
+
+
+async def test_prompt(user_prompt: str, system_prompt: str, model: str | None = None, temperature: float = 0.2) -> str:
+    """Used by the dashboard's AI playground to send an arbitrary prompt
+    against a chosen model and return the raw text. Falls back through the
+    default model list if the chosen model fails."""
+    models = [model] if model else FALLBACK_MODELS
+    if model and model not in FALLBACK_MODELS:
+        # If the chosen model isn't in the free list, still try it first
+        # but fall back to the free list afterwards.
+        models = [model] + FALLBACK_MODELS
+    return await _call(
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        models=models,
+        temperature=temperature,
     )

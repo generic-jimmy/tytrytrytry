@@ -5,6 +5,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.staticfiles import StaticFiles
 
 from app.bot import bot, dp
+from app.bot.handlers import start_scheduler, stop_scheduler
 from app.config import settings
 from app.dashboard.routes import router as dashboard_router
 from app.db import init_models
@@ -15,9 +16,13 @@ async def lifespan(app: FastAPI):
     await init_models()
     webhook_url = f"{settings.base_url}/webhook/{settings.webhook_secret}"
     await bot.set_webhook(webhook_url, drop_pending_updates=True)
-    yield
-    await bot.delete_webhook()
-    await bot.session.close()
+    start_scheduler(bot)
+    try:
+        yield
+    finally:
+        stop_scheduler()
+        await bot.delete_webhook()
+        await bot.session.close()
 
 
 app = FastAPI(lifespan=lifespan)

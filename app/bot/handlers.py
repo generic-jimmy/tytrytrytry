@@ -1,13 +1,18 @@
+import asyncio
 import json
+import re
+from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, F, Router
 from aiogram.filters import Command
 from aiogram.types import ChatMemberUpdated, Message
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 
 from app.bot.moderation import (
+    _update_profile,
     check_flood,
     flood_triggered,
+    get_ai_config,
     is_night_mode_active,
     is_slow_mode_violation,
     log_action,
@@ -18,9 +23,23 @@ from app.bot.moderation import (
 from app.bot.openrouter import admin_tool, interpret_admin_instruction
 from app.bot.purgatory import admit_to_purgatory, allowed_bot_usernames, handle_new_bot
 from app.db import async_session
-from app.models import Filter, Group, Warn
+from app.models import (
+    Admin,
+    Appeal,
+    AutoResponse,
+    CustomCommand,
+    Filter,
+    Group,
+    ScheduledMessage,
+    UserProfile,
+    Warn,
+)
 
 router = Router()
+
+# Background task handle for the scheduled-message poller.
+_scheduler_task: asyncio.Task | None = None
+
 
 # NOTE ON COMMAND NAMES: every admin/moderation command below is prefixed
 # with "b" (e.g. /bwarn, /bmute) specifically so they don't collide with
@@ -37,20 +56,25 @@ async def ensure_group(group_id: int, title: str) -> None:
         if existing is None:
             session.add(Group(id=group_id, title=title))
             await session.commit()
+        elif existing.title != title and title:
+            existing.title = title
+            await session.commit()
 
 
-async def sync_admin(group_id: int, user_id: int) -> None:
+async def sync_admin(group_id: int, user_id: int, full_name: str = "") -> None:
     """Called whenever we confirm someone is a real Telegram admin of the
     group — this is what grants them web dashboard login access for that
     group, so it stays in sync automatically without a manual setup step."""
-    from app.models import Admin
-
     async with async_session() as session:
         result = await session.execute(
             select(Admin).where(Admin.group_id == group_id, Admin.telegram_user_id == user_id)
         )
-        if result.scalar_one_or_none() is None:
-            session.add(Admin(group_id=group_id, telegram_user_id=user_id))
+        existing = result.scalar_one_or_none()
+        if existing is None:
+            session.add(Admin(group_id=group_id, telegram_user_id=user_id, display_name=full_name))
+            await session.commit()
+        elif full_name and existing.display_name != full_name:
+            existing.display_name = full_name
             await session.commit()
 
 
@@ -66,33 +90,35 @@ async def require_admin(bot: Bot, message: Message, silent: bool = False) -> boo
         if not silent:
             await message.reply("Admins only.")
         return False
-    await sync_admin(message.chat.id, message.from_user.id)
+    await sync_admin(message.chat.id, message.from_user.id, message.from_user.full_name)
     return True
 
 
-async def _apply_action(bot: Bot, group_id: int, user_id: int, action: str, reason: str) -> None:
+async def _apply_action(bot: Bot, group_id: int, user_id: int, action: str, reason: str, admin_id: int | None = None) -> None:
     if action == "warn":
         async with async_session() as session:
             session.add(Warn(group_id=group_id, user_id=user_id, reason=reason))
             await session.commit()
-        await log_action(group_id, "warn", user_id, reason)
+        await log_action(group_id, "warn", user_id, reason, admin_id=admin_id)
+        await _update_profile(group_id, user_id, warn_delta=1, rep_delta=-1)
         await _check_warn_threshold(bot, group_id, user_id)
     elif action == "mute":
         await mute_user(bot, group_id, user_id)
-        await log_action(group_id, "mute", user_id, reason)
+        await log_action(group_id, "mute", user_id, reason, admin_id=admin_id)
     elif action == "kick":
         try:
             await bot.ban_chat_member(group_id, user_id)
             await bot.unban_chat_member(group_id, user_id)
         except Exception:
             pass
-        await log_action(group_id, "kick", user_id, reason)
+        await log_action(group_id, "kick", user_id, reason, admin_id=admin_id)
     elif action == "ban":
         try:
             await bot.ban_chat_member(group_id, user_id)
         except Exception:
             pass
-        await log_action(group_id, "ban", user_id, reason)
+        await log_action(group_id, "ban", user_id, reason, admin_id=admin_id)
+        await _update_profile(group_id, user_id, is_banned=True, rep_delta=-10)
 
 
 async def _check_warn_threshold(bot: Bot, group_id: int, user_id: int) -> None:
@@ -133,7 +159,10 @@ async def bhelp_cmd(message: Message) -> None:
         "/bsetlogchannel <channel_id>\n"
         "/bsetwelcome <text>  or  /bsetwelcome ai <prompt>\n"
         "/bsummarize — reply to a message to summarize it\n"
-        "/bai <instruction> — reply to a message, e.g. /bai mute for spam"
+        "/bai <instruction> — reply to a message, e.g. /bai mute for spam\n"
+        "/bappeal <reason> — appeal a recent moderation action against you\n"
+        "/breputation — show your reputation in this group\n"
+        "\nCustom commands (/yourtrigger) and auto-responses are managed from the dashboard."
     )
 
 
@@ -145,6 +174,8 @@ async def on_bot_added(event: ChatMemberUpdated) -> None:
 
 @router.message(F.new_chat_members)
 async def welcome_new_members(message: Message, bot: Bot) -> None:
+    from app.bot.moderation import _bump_analytics
+
     async with async_session() as session:
         group = await session.get(Group, message.chat.id)
 
@@ -157,6 +188,15 @@ async def welcome_new_members(message: Message, bot: Bot) -> None:
             if not allowed:
                 await message.answer(f"Blocked unauthorized bot @{member.username or member.id}.")
             continue
+
+        await _bump_analytics(message.chat.id, new_members=1)
+        await _update_profile(
+            message.chat.id,
+            member.id,
+            username=member.username or "",
+            full_name=member.full_name,
+            rep_delta=1,
+        )
 
         if group and group.purgatory_enabled:
             await admit_to_purgatory(bot, message.chat.id, member)
@@ -180,7 +220,7 @@ async def bwarn_cmd(message: Message, bot: Bot) -> None:
         return
     target = message.reply_to_message.from_user
     reason = message.text.partition(" ")[2].strip() or "manual warn"
-    await _apply_action(bot, message.chat.id, target.id, "warn", reason)
+    await _apply_action(bot, message.chat.id, target.id, "warn", reason, admin_id=message.from_user.id)
     await message.reply(f"Warned {target.full_name}.")
 
 
@@ -193,7 +233,7 @@ async def bmute_cmd(message: Message, bot: Bot) -> None:
         return
     target = message.reply_to_message.from_user
     reason = message.text.partition(" ")[2].strip() or "manual mute"
-    await _apply_action(bot, message.chat.id, target.id, "mute", reason)
+    await _apply_action(bot, message.chat.id, target.id, "mute", reason, admin_id=message.from_user.id)
     await message.reply(f"Muted {target.full_name}.")
 
 
@@ -206,7 +246,7 @@ async def bunmute_cmd(message: Message, bot: Bot) -> None:
         return
     target = message.reply_to_message.from_user
     await unmute_user(bot, message.chat.id, target.id)
-    await log_action(message.chat.id, "unmute", target.id, "manual unmute")
+    await log_action(message.chat.id, "unmute", target.id, "manual unmute", admin_id=message.from_user.id)
     await message.reply(f"Unmuted {target.full_name}.")
 
 
@@ -219,7 +259,7 @@ async def bkick_cmd(message: Message, bot: Bot) -> None:
         return
     target = message.reply_to_message.from_user
     reason = message.text.partition(" ")[2].strip() or "manual kick"
-    await _apply_action(bot, message.chat.id, target.id, "kick", reason)
+    await _apply_action(bot, message.chat.id, target.id, "kick", reason, admin_id=message.from_user.id)
     await message.reply(f"Kicked {target.full_name}.")
 
 
@@ -232,7 +272,7 @@ async def bban_cmd(message: Message, bot: Bot) -> None:
         return
     target = message.reply_to_message.from_user
     reason = message.text.partition(" ")[2].strip() or "manual ban"
-    await _apply_action(bot, message.chat.id, target.id, "ban", reason)
+    await _apply_action(bot, message.chat.id, target.id, "ban", reason, admin_id=message.from_user.id)
     await message.reply(f"Banned {target.full_name}.")
 
 
@@ -248,7 +288,8 @@ async def bunban_cmd(message: Message, bot: Bot) -> None:
         await bot.unban_chat_member(message.chat.id, int(arg))
     except Exception:
         pass
-    await log_action(message.chat.id, "unban", int(arg), "manual unban")
+    await log_action(message.chat.id, "unban", int(arg), "manual unban", admin_id=message.from_user.id)
+    await _update_profile(message.chat.id, int(arg), is_banned=False)
     await message.reply("Unbanned.")
 
 
@@ -512,8 +553,99 @@ async def bai_cmd(message: Message, bot: Bot) -> None:
         await message.reply("No action taken — didn't read that as a moderation instruction.")
         return
 
-    await _apply_action(bot, message.chat.id, target.id, action, reason)
+    await _apply_action(bot, message.chat.id, target.id, action, reason, admin_id=message.from_user.id)
     await message.reply(f"Applied: {action} on {target.full_name} — {reason}")
+
+
+# ------------------------------------------------------- new user-facing --
+
+@router.message(Command("bappeal"))
+async def bappeal_cmd(message: Message) -> None:
+    """Any user can appeal a recent moderation action against themselves.
+    The appeal lands in the dashboard's Appeals tab for admin review."""
+    reason = message.text.partition(" ")[2].strip()
+    if not reason:
+        await message.reply("Usage: /bappeal <explain why the action should be reversed>")
+        return
+    async with async_session() as session:
+        # Find the user's most recent non-trivial mod action to attach the appeal to.
+        result = await session.execute(
+            select(ModLog)
+            .where(ModLog.group_id == message.chat.id, ModLog.target_user_id == message.from_user.id)
+            .order_by(ModLog.created_at.desc())
+            .limit(1)
+        )
+        recent = result.scalar_one_or_none()
+        if recent is None:
+            await message.reply("No recent moderation actions on your account to appeal.")
+            return
+        session.add(
+            Appeal(
+                group_id=message.chat.id,
+                user_id=message.from_user.id,
+                target_action=recent.action,
+                reason=reason,
+            )
+        )
+        await session.commit()
+    await message.reply("Your appeal has been submitted. Admins will review it in the dashboard.")
+
+
+@router.message(Command("breputation"))
+async def breputation_cmd(message: Message) -> None:
+    async with async_session() as session:
+        result = await session.execute(
+            select(UserProfile).where(
+                UserProfile.group_id == message.chat.id,
+                UserProfile.user_id == message.from_user.id,
+            )
+        )
+        profile = result.scalar_one_or_none()
+    if profile is None:
+        await message.reply("You don't have a reputation record yet — send a few messages first.")
+        return
+    await message.reply(
+        f"Your reputation in this group: {profile.reputation}\n"
+        f"Messages: {profile.message_count} | Warns: {profile.warn_count} | "
+        f"Muted: {'yes' if profile.is_muted else 'no'} | Banned: {'yes' if profile.is_banned else 'no'}"
+    )
+
+
+# --------------------------------------------------------- custom commands --
+
+# Built-in command names we must NOT shadow with custom commands. Keeps
+# /bwarn etc. working even if an admin tries to define a /bwarn custom
+# command — the explicit handler above wins by registration order.
+BUILTIN_COMMANDS = {
+    "start", "bhelp", "bwarn", "bmute", "bunmute", "bkick", "bban", "bunban",
+    "bwarnlimit", "baddfilter", "bremovefilter", "bfilters", "brules",
+    "bsetrules", "bnightmode", "bslowmode", "bpurgatory", "bcleanbots",
+    "bsetlogchannel", "bsetwelcome", "bsummarize", "bai", "bappeal",
+    "breputation",
+}
+
+
+@router.message(F.text & F.text.startswith("/"))
+async def custom_command_handler(message: Message, bot: Bot) -> None:
+    """Catch-all for unknown /commands — checks if the group has a custom
+    command defined for this trigger. Runs after the explicit handlers
+    above because aiogram processes routers in registration order, so
+    built-in commands never reach this handler."""
+    if not message.text:
+        return
+    trigger = message.text[1:].split()[0].lower()
+    if not trigger or trigger in BUILTIN_COMMANDS:
+        return  # don't shadow built-in commands
+    async with async_session() as session:
+        result = await session.execute(
+            select(CustomCommand).where(
+                CustomCommand.group_id == message.chat.id,
+                func.lower(CustomCommand.trigger) == trigger,
+            )
+        )
+        cmd = result.scalar_one_or_none()
+    if cmd:
+        await message.reply(cmd.response)
 
 
 # --------------------------------------------------------- auto-moderation --
@@ -521,12 +653,15 @@ async def bai_cmd(message: Message, bot: Bot) -> None:
 @router.message(F.text & ~F.text.startswith("/"))
 async def scan_message(message: Message, bot: Bot) -> None:
     """Runs automatically on every non-command message — the always-on
-    safety layer. Separate from the admin-only tools above, which only ever
-    run when an admin explicitly triggers them."""
+    safety layer. Also matches auto-response triggers before moderation."""
     async with async_session() as session:
         group = await session.get(Group, message.chat.id)
-    if not group:
-        return
+        if group is None:
+            return
+
+    # Auto-responses first — reply with helpful content, then continue
+    # with moderation checks (an auto-response doesn't exempt the user).
+    await _maybe_autorespond(message)
 
     is_admin = await is_telegram_admin(bot, message.chat.id, message.from_user.id)
     if not is_admin:
@@ -546,4 +681,96 @@ async def scan_message(message: Message, bot: Bot) -> None:
 
     if not group.ai_moderation_enabled:
         return
-    await moderate_message(bot, message.chat.id, message.from_user.id, message.message_id, message.text)
+    await moderate_message(
+        bot,
+        message.chat.id,
+        message.from_user.id,
+        message.message_id,
+        message.text,
+        username=message.from_user.username or "",
+        full_name=message.from_user.full_name,
+    )
+
+
+async def _maybe_autorespond(message: Message) -> None:
+    text = message.text or ""
+    async with async_session() as session:
+        result = await session.execute(
+            select(AutoResponse).where(
+                AutoResponse.group_id == message.chat.id,
+                AutoResponse.enabled == True,  # noqa: E712
+            )
+        )
+        rules = result.scalars().all()
+
+    for rule in rules:
+        haystack = text if rule.case_sensitive else text.lower()
+        needle = rule.trigger if rule.case_sensitive else rule.trigger.lower()
+        if rule.match_type == "exact" and haystack == needle:
+            await message.reply(rule.response)
+            return
+        if rule.match_type == "regex":
+            try:
+                if re.search(rule.trigger, text, 0 if rule.case_sensitive else re.IGNORECASE):
+                    await message.reply(rule.response)
+                    return
+            except re.error:
+                continue
+        elif needle in haystack:  # default: contains
+            await message.reply(rule.response)
+            return
+
+
+# ------------------------------------------------- scheduled messages loop --
+
+async def scheduled_messages_loop(bot: Bot) -> None:
+    """Background coroutine that polls for due scheduled messages every 30s
+    and posts them. Started by main.py's lifespan handler."""
+    while True:
+        try:
+            now = datetime.now(timezone.utc)
+            async with async_session() as session:
+                result = await session.execute(
+                    select(ScheduledMessage).where(
+                        ScheduledMessage.sent == False,  # noqa: E712
+                        ScheduledMessage.scheduled_for <= now,
+                    )
+                )
+                due = result.scalars().all()
+                for item in due:
+                    try:
+                        await bot.send_message(item.group_id, item.text)
+                    except Exception:
+                        pass
+                    item.sent = True
+                    if item.repeat_hour is not None:
+                        # Schedule tomorrow's instance at the same hour.
+                        next_run = (now + timedelta(days=1)).replace(
+                            hour=item.repeat_hour % 24, minute=0, second=0, microsecond=0
+                        )
+                        session.add(
+                            ScheduledMessage(
+                                group_id=item.group_id,
+                                text=item.text,
+                                scheduled_for=next_run,
+                                repeat_hour=item.repeat_hour,
+                                created_by=item.created_by,
+                            )
+                        )
+                await session.commit()
+        except Exception:
+            pass  # don't let one bad loop kill the scheduler
+        await asyncio.sleep(30)
+
+
+def start_scheduler(bot: Bot) -> None:
+    global _scheduler_task
+    if _scheduler_task is None or _scheduler_task.done():
+        _scheduler_task = asyncio.create_task(scheduled_messages_loop(bot))
+
+
+def stop_scheduler() -> None:
+    global _scheduler_task
+    if _scheduler_task is not None and not _scheduler_task.done():
+        _scheduler_task.cancel()
+    _scheduler_task = None
