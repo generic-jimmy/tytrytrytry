@@ -1,0 +1,26 @@
+{% extends "base.html" %}
+{% block content %}
+<a href="/dashboard" class="back-link">&larr; All groups</a>
+<h1>Flagged messages</h1>
+{% if flags %}
+<ul class="flag-list">
+  {% for f in flags %}
+  <li class="flag-item">
+    <div class="flag-meta">
+      <span class="badge badge-{{ f.severity }}">{{ f.category }} &middot; {{ f.severity }}</span>
+      <span class="flag-user">user {{ f.user_id }}</span>
+    </div>
+    <p class="flag-text">{{ f.message_text }}</p>
+    <form method="post" action="/dashboard/{{ group_id }}/queue/{{ f.id }}/approve" class="flag-actions">
+      <button type="submit" class="btn btn-danger">Mark as violation</button>
+    </form>
+    <form method="post" action="/dashboard/{{ group_id }}/queue/{{ f.id }}/dismiss" class="flag-actions">
+      <button type="submit" class="btn btn-quiet">Dismiss</button>
+    </form>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty">Nothing flagged right now.</p>
+{% endif %}
+{% endblock %}

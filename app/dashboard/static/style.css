@@ -1,0 +1,184 @@
+:root {
+  --bg: #FAFAF8;
+  --surface: #FFFFFF;
+  --text: #1C1C1A;
+  --text-muted: #6B6A63;
+  --border: #E4E2DA;
+  --accent: #2F3E52;
+  --accent-text: #FFFFFF;
+  --danger: #B23A2E;
+  --warn: #C77D2E;
+  --radius: 6px;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+}
+
+.topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 16px 32px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.brand { font-weight: 600; letter-spacing: -0.01em; }
+
+.logout-link { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+.logout-link:hover { color: var(--text); }
+
+.content { max-width: 720px; margin: 0 auto; padding: 48px 24px; }
+
+h1 { font-size: 24px; font-weight: 600; margin: 16px 0 8px; letter-spacing: -0.01em; }
+
+p { color: var(--text-muted); }
+.hint { font-size: 13px; }
+
+.login-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 40px;
+  text-align: center;
+}
+
+.widget-holder { margin-top: 24px; display: flex; justify-content: center; }
+
+.group-list, .flag-list {
+  list-style: none;
+  padding: 0;
+  margin: 24px 0 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.group-list li {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+
+.group-title { font-weight: 500; }
+
+.btn {
+  display: inline-block;
+  background: var(--accent);
+  color: var(--accent-text);
+  border: none;
+  border-radius: var(--radius);
+  padding: 8px 16px;
+  font-size: 14px;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.btn-danger { background: var(--danger); }
+.btn-quiet { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+
+.back-link { color: var(--text-muted); text-decoration: none; font-size: 14px; }
+
+.flag-item {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+
+.flag-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.badge { padding: 2px 8px; border-radius: 999px; background: var(--border); font-size: 12px; }
+.badge-high { background: #F3D9D5; color: var(--danger); }
+.badge-medium, .badge-low { background: #F1E3D1; color: var(--warn); }
+
+.flag-text { color: var(--text); white-space: pre-wrap; margin: 0 0 12px; }
+.flag-actions { display: inline-block; margin-right: 8px; }
+
+.empty {
+  margin-top: 24px;
+  padding: 24px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  text-align: center;
+}
+
+/* --- Purgatory / settings / modlog additions --- */
+
+.group-links { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.purgatory-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.toggle-form { display: flex; align-items: center; gap: 8px; }
+.toggle { position: relative; display: inline-block; width: 40px; height: 22px; flex-shrink: 0; }
+.toggle input { opacity: 0; width: 0; height: 0; }
+.toggle-slider {
+  position: absolute; inset: 0; background: var(--border);
+  border-radius: 999px; cursor: pointer; transition: background 0.15s;
+}
+.toggle-slider::before {
+  content: ""; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px;
+  background: var(--surface); border-radius: 50%; transition: transform 0.15s;
+}
+.toggle input:checked + .toggle-slider { background: var(--accent); }
+.toggle input:checked + .toggle-slider::before { transform: translateX(18px); }
+.toggle-label { font-size: 14px; color: var(--text-muted); }
+
+.stats-bar { display: flex; gap: 8px; flex-wrap: wrap; margin: 20px 0; }
+.stat-pill { padding: 4px 12px; border-radius: 999px; font-size: 13px; background: var(--border); }
+.stat-pending { background: #F1E3D1; color: var(--warn); }
+.stat-approved { background: #DCEBD8; color: #2F6B3A; }
+.stat-denied { background: #F3D9D5; color: var(--danger); }
+.stat-suspicious { background: #F3D9D5; color: var(--danger); }
+.stat-banned { background: #E7E5DC; color: var(--text); }
+
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 16px; flex-wrap: wrap; }
+.tab { padding: 8px 14px; font-size: 14px; color: var(--text-muted); text-decoration: none; border-bottom: 2px solid transparent; }
+.tab-active { color: var(--text); border-bottom-color: var(--accent); font-weight: 500; }
+
+.table { width: 100%; border-collapse: collapse; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.table th, .table td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--border); font-size: 14px; }
+.table th { color: var(--text-muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: 0.02em; }
+.table tr:last-child td { border-bottom: none; }
+.table-actions { display: flex; gap: 6px; flex-wrap: wrap; }
+.inline-form { display: inline-block; }
+.muted { color: var(--text-muted); font-size: 13px; }
+.btn-approve { background: #2F6B3A; }
+
+.settings-form { display: flex; flex-direction: column; gap: 16px; margin: 24px 0 40px; max-width: 480px; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field span { font-size: 13px; color: var(--text-muted); }
+.field textarea, .field input[type=number] {
+  border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px;
+  font-family: inherit; font-size: 14px; background: var(--surface); color: var(--text);
+}
+.field-row { display: flex; align-items: center; gap: 8px; font-size: 14px; }
+
+.filter-list { list-style: none; padding: 0; margin: 16px 0; display: flex; flex-direction: column; gap: 8px; max-width: 480px; }
+.filter-list li { display: flex; justify-content: space-between; align-items: center; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; font-size: 14px; }
+.filter-add-form { display: flex; gap: 8px; margin-top: 8px; max-width: 480px; }
+.filter-add-form input[type=text] { flex: 1; border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; font-size: 14px; }
+.filter-add-form select { border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 10px; font-size: 14px; }

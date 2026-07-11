@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block content %}
+<a href="/dashboard" class="back-link">&larr; All groups</a>
+
+<div class="purgatory-header">
+  <div>
+    <h1>Purgatory</h1>
+    <p>New members are muted until you approve, deny, or ban them.</p>
+  </div>
+  <form method="post" action="/dashboard/{{ group_id }}/purgatory/toggle" class="toggle-form">
+    <label class="toggle">
+      <input type="checkbox" name="always_allow" onchange="this.form.submit()" {% if not purgatory_enabled %}checked{% endif %}>
+      <span class="toggle-slider"></span>
+    </label>
+    <span class="toggle-label">Always allow (skip approval)</span>
+  </form>
+</div>
+
+<div class="stats-bar">
+  <span class="stat-pill stat-pending">{{ counts.pending }} pending</span>
+  <span class="stat-pill stat-approved">{{ counts.approved }} approved</span>
+  <span class="stat-pill stat-denied">{{ counts.denied }} denied</span>
+  <span class="stat-pill stat-suspicious">{{ counts.suspicious }} suspicious</span>
+  <span class="stat-pill stat-banned">{{ counts.banned }} banned</span>
+</div>
+
+<div class="tabs">
+  {% for t in ["pending", "suspicious", "approved", "denied", "banned"] %}
+  <a href="/dashboard/{{ group_id }}/purgatory?tab={{ t }}" class="tab {% if tab == t %}tab-active{% endif %}">{{ t|capitalize }}</a>
+  {% endfor %}
+</div>
+
+{% if entries %}
+<table class="table">
+  <thead>
+    <tr>
+      <th>User</th><th>Telegram ID</th><th>Language</th><th>Premium</th><th>Joined</th><th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for e in entries %}
+    <tr>
+      <td>{{ e.full_name }}{% if e.username %} <span class="muted">@{{ e.username }}</span>{% endif %}</td>
+      <td>{{ e.user_id }}</td>
+      <td>{{ e.language_code or "\u2014" }}</td>
+      <td>{{ "Yes" if e.is_premium else "No" }}</td>
+      <td>{{ e.joined_at.strftime("%Y-%m-%d %H:%M") }}</td>
+      <td class="table-actions">
+        {% if e.status in ("pending", "suspicious") %}
+        <form method="post" action="/dashboard/{{ group_id }}/purgatory/{{ e.id }}/approve?tab={{ tab }}" class="inline-form">
+          <button class="btn btn-approve" type="submit">Approve</button>
+        </form>
+        <form method="post" action="/dashboard/{{ group_id }}/purgatory/{{ e.id }}/deny?tab={{ tab }}" class="inline-form">
+          <button class="btn btn-quiet" type="submit">Deny</button>
+        </form>
+        <form method="post" action="/dashboard/{{ group_id }}/purgatory/{{ e.id }}/ban?tab={{ tab }}" class="inline-form">
+          <button class="btn btn-danger" type="submit">Ban</button>
+        </form>
+        {% else %}
+        <span class="muted">&mdash;</span>
+        {% endif %}
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No members in this category.</div>
+{% endif %}
+{% endblock %}

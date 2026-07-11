@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="login-card">
+  <h1>Admin sign in</h1>
+  <p>Sign in with the Telegram account that's an admin in one of your groups.</p>
+  <p class="hint">First time here? Run any admin command (like /warn) in your group first — that's what grants dashboard access.</p>
+  <div class="widget-holder">
+    <script async src="https://telegram.org/js/telegram-widget.js?22"
+      data-telegram-login="{{ bot_username }}"
+      data-size="large"
+      data-auth-url="/auth/telegram/callback"
+      data-request-access="write"></script>
+  </div>
+</div>
+{% endblock %}

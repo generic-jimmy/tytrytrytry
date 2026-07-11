@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block content %}
+<a href="/dashboard" class="back-link">&larr; All groups</a>
+<h1>Settings</h1>
+
+<form method="post" action="/dashboard/{{ group.id }}/settings" class="settings-form">
+  <label class="field">
+    <span>Welcome message</span>
+    <textarea name="welcome_message" rows="3">{{ group.welcome_message }}</textarea>
+  </label>
+  <label class="field">
+    <span>Rules</span>
+    <textarea name="rules" rows="4">{{ group.rules }}</textarea>
+  </label>
+  <label class="field-row">
+    <input type="checkbox" name="ai_moderation_enabled" {% if group.ai_moderation_enabled %}checked{% endif %}>
+    <span>AI moderation enabled</span>
+  </label>
+  <label class="field-row">
+    <input type="checkbox" name="purgatory_enabled" {% if group.purgatory_enabled %}checked{% endif %}>
+    <span>Purgatory (hold new members for approval)</span>
+  </label>
+  <label class="field-row">
+    <input type="checkbox" name="night_mode_enabled" {% if group.night_mode_enabled %}checked{% endif %}>
+    <span>Night mode ({{ group.night_start_hour }}:00&ndash;{{ group.night_end_hour }}:00 UTC)</span>
+  </label>
+  <label class="field">
+    <span>Warn limit (auto-mute after this many warns)</span>
+    <input type="number" name="warn_limit" min="1" value="{{ group.warn_limit }}">
+  </label>
+  <label class="field">
+    <span>Slow mode &mdash; seconds between messages (0 to disable)</span>
+    <input type="number" name="slow_mode_seconds" min="0" value="{{ group.slow_mode_seconds }}">
+  </label>
+  <button type="submit" class="btn">Save settings</button>
+</form>
+
+<h1>Filters</h1>
+{% if filters %}
+<ul class="filter-list">
+  {% for f in filters %}
+  <li>
+    <span>[{{ f.type }}] {{ f.pattern }}</span>
+    <form method="post" action="/dashboard/{{ group.id }}/filters/{{ f.id }}/delete" class="inline-form">
+      <button class="btn btn-quiet" type="submit">Remove</button>
+    </form>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty">No filters yet.</p>
+{% endif %}
+<form method="post" action="/dashboard/{{ group.id }}/filters/add" class="filter-add-form">
+  <select name="type">
+    <option value="word">word</option>
+    <option value="link">link</option>
+  </select>
+  <input type="text" name="pattern" placeholder="pattern to block" required>
+  <button type="submit" class="btn">Add filter</button>
+</form>
+
+<p class="hint" style="margin-top: 32px;">Night mode hours and log channel are set via bot commands for now &mdash; /bnightmode on 22 6, /bsetlogchannel &lt;channel_id&gt;. Send /bhelp in the group for the full list.</p>
+{% endblock %}

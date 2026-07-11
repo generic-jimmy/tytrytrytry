@@ -1,0 +1,21 @@
+{% extends "base.html" %}
+{% block content %}
+<h1>Your groups</h1>
+{% if groups %}
+<ul class="group-list">
+  {% for g in groups %}
+  <li>
+    <span class="group-title">{{ g.title or g.id }}</span>
+    <span class="group-links">
+      <a href="/dashboard/{{ g.id }}/purgatory" class="btn">Purgatory</a>
+      <a href="/dashboard/{{ g.id }}/queue" class="btn btn-quiet">Review queue</a>
+      <a href="/dashboard/{{ g.id }}/settings" class="btn btn-quiet">Settings</a>
+      <a href="/dashboard/{{ g.id }}/modlog" class="btn btn-quiet">Mod log</a>
+    </span>
+  </li>
+  {% endfor %}
+</ul>
+{% else %}
+<p class="empty">No groups yet. Add the bot to a group and use any admin command there first — that's what grants dashboard access.</p>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+{% block content %}
+<a href="/dashboard" class="back-link">&larr; All groups</a>
+<h1>Moderation log</h1>
+{% if logs %}
+<table class="table">
+  <thead><tr><th>Action</th><th>User</th><th>Reason</th><th>When</th></tr></thead>
+  <tbody>
+    {% for l in logs %}
+    <tr>
+      <td>{{ l.action }}</td>
+      <td>{{ l.target_user_id }}</td>
+      <td>{{ l.reason }}</td>
+      <td>{{ l.created_at.strftime("%Y-%m-%d %H:%M") }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<div class="empty">No actions logged yet.</div>
+{% endif %}
+{% endblock %}
