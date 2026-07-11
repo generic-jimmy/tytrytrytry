@@ -4,6 +4,24 @@
   <h1>Admin sign in</h1>
   <p>Sign in with the Telegram account that's an admin in one of your groups.</p>
   <p class="hint">First time here? Run any admin command (like /warn) in your group first — that's what grants dashboard access.</p>
+
+  {% if request.query_params.get("error") == "1" %}
+  <p class="hint" style="color: var(--danger); margin-top: 16px;">
+    Telegram login verification failed. Please try again.
+  </p>
+  {% elif request.query_params.get("error") == "not_admin" %}
+  <p class="hint" style="color: var(--warn); margin-top: 16px;">
+    You're not registered as an admin in any group yet. Run an admin command like <code>/bwarn</code> in your group first — that's what grants dashboard access.
+  </p>
+  {% elif request.query_params.get("error") == "db" %}
+  <p class="hint" style="color: var(--danger); margin-top: 16px;">
+    <strong>Database error during sign-in.</strong>
+    {% if request.query_params.get("msg") %}<br><code style="font-size: 11px; word-break: break-all;">{{ request.query_params.get("msg") }}</code>{% endif %}
+    <br><br>
+    If this mentions a missing column (e.g. <code>column admins.role does not exist</code>), the deployment needs a restart so the lightweight schema migration runs on boot. The migration adds the missing columns automatically — no manual SQL needed.
+  </p>
+  {% endif %}
+
   <div class="widget-holder">
     <script async src="https://telegram.org/js/telegram-widget.js?22"
       data-telegram-login="{{ bot_username }}"

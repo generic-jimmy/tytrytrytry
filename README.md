@@ -64,8 +64,30 @@ plus eight new database tables and ~30 new API endpoints.
 `user_profiles`, `custom_commands`, `auto_responses`, `scheduled_messages`,
 `ai_config`, `appeals`, `analytics_snapshots`, `audit_events`. Existing
 tables (`groups`, `admins`, `warns`, `mod_log`, `flagged_messages`,
-`filters`, `purgatory_entries`) are unchanged — `init_models()` creates
-the new ones alongside on first boot.
+`filters`, `purgatory_entries`) are unchanged in shape, but the upgrade
+adds a few new columns to three of them:
+
+| Table | New columns | Purpose |
+|---|---|---|
+| `admins` | `role`, `display_name` | role hierarchy + friendly name in the dashboard |
+| `groups` | `dashboard_theme` | per-group theme preference |
+| `mod_log` | `admin_id` | tracks which admin took each action |
+
+**No manual SQL needed.** On boot, `init_models()` now runs an idempotent
+lightweight migration (`_run_lightweight_migrations` in `app/db.py`) that
+inspects each existing table and runs `ALTER TABLE ... ADD COLUMN ...` for
+any new column that's missing. This means upgrading an existing deployment
+just requires a container restart — the schema patches itself. Brand-new
+tables are still created via SQLAlchemy's `create_all()`.
+
+The migration is:
+- **Idempotent** — safe to run on every boot, even after the schema is up to date.
+- **Non-destructive** — it only adds columns, never drops or renames them.
+- **Data-preserving** — existing rows get the column's DEFAULT value.
+- **Tested** — `verify.py` includes an end-to-end test that creates the OLD schema in an in-memory SQLite DB, runs the migration, and asserts every new column appears and existing data survives.
+
+For schema changes beyond column additions (renames, type changes, drops),
+you'll still want Alembic — see "What's next" below.
 
 ## 1. Create the bot
 

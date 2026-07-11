@@ -45,14 +45,26 @@ async def telegram_callback(request: Request):
 
     telegram_user_id = int(data["id"])
     display_name = data.get("first_name") or data.get("username") or ""
-    async with async_session() as session:
-        result = await session.execute(select(Admin).where(Admin.telegram_user_id == telegram_user_id))
-        admin = result.scalar_one_or_none()
-        if admin is None:
-            return RedirectResponse("/login?error=not_admin")
-        if display_name and admin.display_name != display_name:
-            admin.display_name = display_name
-            await session.commit()
+    try:
+        async with async_session() as session:
+            result = await session.execute(select(Admin).where(Admin.telegram_user_id == telegram_user_id))
+            admin = result.scalar_one_or_none()
+            if admin is None:
+                return RedirectResponse("/login?error=not_admin")
+            # display_name is a new column added by the lightweight migration
+            # in db.py — guard against it still being missing on a freshly
+            # upgraded deployment that hasn't run init_models() yet.
+            if display_name and getattr(admin, "display_name", "") != display_name:
+                admin.display_name = display_name
+                await session.commit()
+    except Exception as exc:
+        # Surface schema/DB errors with a useful message instead of a raw 500.
+        # The most common cause is a stale DB schema — the lightweight
+        # migration in db.py runs on boot and should fix this, but if the
+        # container restarted mid-flight, route the user to a clear error.
+        import logging
+        logging.exception("DB error during telegram auth callback")
+        return RedirectResponse(f"/login?error=db&msg={str(exc)[:200]}")
 
     response = RedirectResponse("/app")
     response.set_cookie(

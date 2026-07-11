@@ -8,3 +8,4 @@ httpx
 jinja2
 python-multipart
 itsdangerous
+aiosqlite

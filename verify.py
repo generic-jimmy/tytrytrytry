@@ -342,6 +342,137 @@ try:
 except Exception as e:
     fail("settings construction", traceback.format_exc().strip().splitlines()[-1])
 
+
+# ----------------------------------------------------------- 11. Migration logic
+section("11. Lightweight migration logic (db.py)")
+
+async def _test_migration_logic():
+    """Run an end-to-end test of the migration on an in-memory SQLite DB.
+    Creates the OLD schema (without new columns), runs init_models(), and
+    verifies the new columns were added without losing existing data."""
+    from app.db import _COLUMN_ADDITIONS, init_models
+    import sqlalchemy as sa
+    from sqlalchemy.ext.asyncio import create_async_engine
+    import app.db as db_module
+
+    # 1. Verify the migration map covers every column we added.
+    expected_migrations = {
+        "admins": {"role", "display_name"},
+        "groups": {"dashboard_theme"},
+        "mod_log": {"admin_id"},
+    }
+    for table, cols in expected_migrations.items():
+        actual = {c[0] for c in _COLUMN_ADDITIONS.get(table, [])}
+        if actual == cols:
+            ok(f"migration map for '{table}' covers {sorted(cols)}")
+        else:
+            missing = cols - actual
+            fail(f"migration map for '{table}' missing: {missing}")
+
+    # 2. Functional test against SQLite.
+    test_engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    original_engine = db_module.engine
+    db_module.engine = test_engine
+    try:
+        # Create OLD schema (without new columns) — simulate a production
+        # DB that was created by the previous version of the app.
+        async with test_engine.begin() as conn:
+            await conn.execute(sa.text(
+                "CREATE TABLE groups ("
+                "id BIGINT PRIMARY KEY, title VARCHAR(255) DEFAULT '', "
+                "ai_moderation_enabled BOOLEAN DEFAULT TRUE, "
+                "welcome_message TEXT DEFAULT 'Welcome!', rules TEXT DEFAULT '', "
+                "warn_limit INTEGER DEFAULT 3, night_mode_enabled BOOLEAN DEFAULT FALSE, "
+                "night_start_hour INTEGER DEFAULT 22, night_end_hour INTEGER DEFAULT 6, "
+                "slow_mode_seconds INTEGER DEFAULT 0, purgatory_enabled BOOLEAN DEFAULT TRUE, "
+                "mod_log_channel_id BIGINT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            ))
+            await conn.execute(sa.text(
+                "CREATE TABLE admins ("
+                "id INTEGER PRIMARY KEY, telegram_user_id BIGINT, group_id BIGINT, "
+                "added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            ))
+            await conn.execute(sa.text(
+                "CREATE TABLE mod_log ("
+                "id INTEGER PRIMARY KEY, group_id BIGINT, action VARCHAR(50), "
+                "target_user_id BIGINT, reason TEXT DEFAULT '', "
+                "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+            ))
+            # Insert a row so we can confirm data survives the migration.
+            await conn.execute(sa.text(
+                "INSERT INTO admins (id, telegram_user_id, group_id) VALUES (1, 123, 456)"
+            ))
+
+        # Run init_models() — should ADD COLUMN for the missing fields,
+        # and create_all() for the brand-new tables.
+        await init_models()
+
+        # Verify the new columns now exist on the old tables.
+        async with test_engine.connect() as conn:
+            from sqlalchemy import inspect as sa_inspect
+
+            def _get_schema(sync_conn):
+                insp = sa_inspect(sync_conn)
+                return {
+                    t: {c["name"] for c in insp.get_columns(t)}
+                    for t in insp.get_table_names()
+                }
+
+            schema = await conn.run_sync(_get_schema)
+            admin_cols = schema.get("admins", set())
+            group_cols = schema.get("groups", set())
+            modlog_cols = schema.get("mod_log", set())
+
+            for col in ["role", "display_name"]:
+                if col in admin_cols:
+                    ok(f"admins.{col} added by migration")
+                else:
+                    fail(f"admins.{col} NOT added by migration")
+
+            if "dashboard_theme" in group_cols:
+                ok("groups.dashboard_theme added by migration")
+            else:
+                fail("groups.dashboard_theme NOT added by migration")
+
+            if "admin_id" in modlog_cols:
+                ok("mod_log.admin_id added by migration")
+            else:
+                fail("mod_log.admin_id NOT added by migration")
+
+            # Verify the existing row survived (no data loss).
+            row = (await conn.execute(sa.text("SELECT telegram_user_id FROM admins WHERE id = 1"))).scalar_one_or_none()
+            if row == 123:
+                ok("existing admins row preserved across migration")
+            else:
+                fail(f"existing admins row lost — got {row!r}, expected 123")
+
+            # Verify a brand-new table was created.
+            for expected in ["user_profiles", "custom_commands", "auto_responses",
+                             "scheduled_messages", "ai_config", "appeals",
+                             "analytics_snapshots", "audit_events"]:
+                if expected in schema:
+                    ok(f"new table '{expected}' created by create_all()")
+                else:
+                    fail(f"new table '{expected}' NOT created")
+
+        # Run init_models() AGAIN to verify idempotency — second run should
+        # be a no-op, not crash.
+        try:
+            await init_models()
+            ok("init_models() idempotent (second run succeeded)")
+        except Exception as e:
+            fail(f"init_models() not idempotent: {e}")
+
+    finally:
+        db_module.engine = original_engine
+        await test_engine.dispose()
+
+try:
+    import asyncio
+    asyncio.run(_test_migration_logic())
+except Exception as e:
+    fail("migration logic test", traceback.format_exc().strip().splitlines()[-1])
+
 # ----------------------------------------------------------- summary
 print(f"\n\033[1m{'='*60}\033[0m")
 print(f"  \033[32mPassed: {PASS}\033[0m  ·  \033[31mFailed: {FAIL}\033[0m")
