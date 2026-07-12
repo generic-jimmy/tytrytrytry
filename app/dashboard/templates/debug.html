@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Debug · Group Bot</title>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #0a0d14; --surface: #11151f; --surface-2: #161b27;
+      --border: #232b3f; --border-strong: #2e3850;
+      --text: #e7ecf5; --text-muted: #8b93a7; --text-dim: #5d6478;
+      --accent: #6c8cff; --success: #4ade80; --warn: #fbbf24; --danger: #f87171;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; padding: 24px;
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg); color: var(--text);
+      font-size: 14px; line-height: 1.6;
+    }
+    h1 { font-size: 22px; margin: 0 0 8px; }
+    h2 { font-size: 15px; margin: 28px 0 12px; font-weight: 600; }
+    .sub { color: var(--text-muted); margin: 0 0 20px; font-size: 13px; }
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 16px; margin-bottom: 12px;
+    }
+    .row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; }
+    .row + .row { border-top: 1px solid var(--border); }
+    .label { color: var(--text-muted); font-size: 12px; }
+    .value { font-family: 'JetBrains Mono', monospace; font-size: 12px; word-break: break-all; text-align: right; }
+    .value.ok { color: var(--success); }
+    .value.bad { color: var(--danger); }
+    .value.warn { color: var(--warn); }
+    .btn {
+      display: inline-block; background: var(--accent); color: white;
+      border: none; border-radius: 8px; padding: 8px 14px; font-size: 13px;
+      font-weight: 600; cursor: pointer; margin-right: 8px; margin-top: 8px;
+      font-family: inherit;
+    }
+    .btn:hover { opacity: 0.9; }
+    .btn-ghost { background: transparent; color: var(--text-muted); border: 1px solid var(--border); }
+    pre {
+      background: var(--surface-2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 12px; font-family: 'JetBrains Mono', monospace;
+      font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word;
+      margin: 8px 0; max-height: 400px; overflow-y: auto;
+    }
+    .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+    .status-dot.ok { background: var(--success); box-shadow: 0 0 6px var(--success); }
+    .status-dot.bad { background: var(--danger); box-shadow: 0 0 6px var(--danger); }
+    .status-dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+    .nav-back { margin-bottom: 16px; display: inline-block; font-size: 13px; }
+    .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 800px) { .grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <a href="/app" class="nav-back">← Back to dashboard</a>
+  <h1>Debug &amp; Diagnostics</h1>
+  <p class="sub">If the bot isn't responding to commands in Telegram, the answers are here. Check the webhook status, bot info, and pending update count.</p>
+
+  <div class="grid">
+    <div>
+      <h2>1. Webhook status</h2>
+      <div class="card" id="webhook-card">Loading…</div>
+      <button class="btn" onclick="refreshWebhook()">Refresh webhook registration</button>
+
+      <h2>2. Bot info (token check)</h2>
+      <div class="card" id="bot-card">Loading…</div>
+
+      <h2>3. Send test message</h2>
+      <div class="card" id="test-card">
+        <p style="margin:0 0 8px;color:var(--text-muted);font-size:13px;">Sends a test message to your first group to verify the bot can post.</p>
+        <button class="btn" onclick="sendTest()">Send test message</button>
+      </div>
+    </div>
+    <div>
+      <h2>Common issues &amp; fixes</h2>
+      <div class="card">
+        <div class="row"><span class="label">Bot doesn't respond at all</span></div>
+        <div style="padding:8px 0;color:var(--text-muted);font-size:13px;">
+          Check <code style="color:var(--accent);">telegram_webhook.url</code> above. It must match <code style="color:var(--accent);">configured_url</code> and be reachable from the public internet. If <code style="color:var(--danger);">last_error_message</code> is set, Telegram has been failing to deliver — read the message.
+        </div>
+      </div>
+      <div class="card">
+        <div class="row"><span class="label">Bot responds to /start but not group messages</span></div>
+        <div style="padding:8px 0;color:var(--text-muted);font-size:13px;">
+          Open <a href="https://t.me/BotFather" target="_blank">@BotFather</a> → /setprivacy → select your bot → <strong>Disable</strong>. Until privacy mode is off, the bot can only see commands (messages starting with /), not regular group messages.
+        </div>
+      </div>
+      <div class="card">
+        <div class="row"><span class="label">Bot was added to group but does nothing</span></div>
+        <div style="padding:8px 0;color:var(--text-muted);font-size:13px;">
+          The bot must be promoted to <strong>admin</strong> in the group for moderation commands to work. Also, run any admin command (like <code style="color:var(--accent);">/bwarn</code> as a reply) once — that's what registers you for dashboard access.
+        </div>
+      </div>
+      <div class="card">
+        <div class="row"><span class="label">pending_update_count is high</span></div>
+        <div style="padding:8px 0;color:var(--text-muted);font-size:13px;">
+          If this number is growing, Telegram is trying to deliver updates but your webhook is returning non-2xx or timing out. Check server logs for <code style="color:var(--danger);">Webhook handler error</code> entries.
+        </div>
+      </div>
+      <div class="card">
+        <div class="row"><span class="label">Dashboard shows "Page not found"</span></div>
+        <div style="padding:8px 0;color:var(--text-muted);font-size:13px;">
+          This was a script-load-order bug in earlier versions — fixed. If you still see it, hard-refresh the browser (Ctrl+Shift+R / Cmd+Shift+R) to bypass cache.
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <h2>Raw webhook response</h2>
+  <pre id="raw-webhook">Loading…</pre>
+
+  <h2>Raw bot info response</h2>
+  <pre id="raw-bot">Loading…</pre>
+
+  <script>
+    async function fetchJSON(url, opts) {
+      const res = await fetch(url, opts);
+      return res.json();
+    }
+
+    async function loadWebhook() {
+      const card = document.getElementById('webhook-card');
+      const raw = document.getElementById('raw-webhook');
+      try {
+        const data = await fetchJSON('/api/debug/webhook');
+        raw.textContent = JSON.stringify(data, null, 2);
+        if (data.error) {
+          card.innerHTML = `<div class="row"><span class="label">Status</span><span class="value bad"><span class="status-dot bad"></span>Error</span></div><div class="row"><span class="label">Error</span><span class="value bad">${data.error}</span></div>`;
+          return;
+        }
+        const tw = data.telegram_webhook || {};
+        const match = data.match;
+        const hasError = tw.last_error_message;
+        const pending = tw.pending_update_count || 0;
+        card.innerHTML = `
+          <div class="row"><span class="label">Configured URL</span><span class="value">${data.configured_url || '—'}</span></div>
+          <div class="row"><span class="label">Telegram's URL</span><span class="value">${tw.url || '(empty — webhook not set)'}</span></div>
+          <div class="row"><span class="label">URLs match?</span><span class="value ${match ? 'ok' : 'bad'}"><span class="status-dot ${match ? 'ok' : 'bad'}"></span>${match ? 'Yes' : 'NO — mismatch'}</span></div>
+          <div class="row"><span class="label">Pending updates</span><span class="value ${pending > 5 ? 'bad' : pending > 0 ? 'warn' : 'ok'}">${pending}</span></div>
+          <div class="row"><span class="label">Last error</span><span class="value ${hasError ? 'bad' : 'ok'}"><span class="status-dot ${hasError ? 'bad' : 'ok'}"></span>${tw.last_error_message || 'none'}</span></div>
+          <div class="row"><span class="label">Last error time</span><span class="value">${tw.last_error_date ? new Date(tw.last_error_date * 1000).toLocaleString() : '—'}</span></div>
+          <div class="row"><span class="label">Custom cert</span><span class="value">${tw.has_custom_certificate ? 'Yes' : 'No (using Let\'s Encrypt etc.)'}</span></div>
+          <div class="row"><span class="label">BASE_URL env</span><span class="value">${data.base_url_env || '—'}</span></div>
+          <div class="row"><span class="label">WEBHOOK_SECRET env</span><span class="value">${data.webhook_secret_env || '—'}</span></div>
+        `;
+      } catch (e) {
+        card.innerHTML = `<div class="value bad">Failed to load: ${e.message}</div>`;
+      }
+    }
+
+    async function loadBotInfo() {
+      const card = document.getElementById('bot-card');
+      const raw = document.getElementById('raw-bot');
+      try {
+        const data = await fetchJSON('/api/debug/bot-info');
+        raw.textContent = JSON.stringify(data, null, 2);
+        if (data.ok) {
+          const b = data.bot;
+          const canRead = b.can_read_all_group_messages;
+          card.innerHTML = `
+            <div class="row"><span class="label">Status</span><span class="value ok"><span class="status-dot ok"></span>Token valid</span></div>
+            <div class="row"><span class="label">Bot ID</span><span class="value">${b.id}</span></div>
+            <div class="row"><span class="label">Username</span><span class="value">@${b.username}</span></div>
+            <div class="row"><span class="label">Name</span><span class="value">${b.first_name}</span></div>
+            <div class="row"><span class="label">Can join groups</span><span class="value ${b.can_join_groups ? 'ok' : 'bad'}">${b.can_join_groups ? 'Yes' : 'NO — enable via BotFather /setjoingroups'}</span></div>
+            <div class="row"><span class="label">Can read all group messages</span><span class="value ${canRead ? 'ok' : 'bad'}"><span class="status-dot ${canRead ? 'ok' : 'bad'}"></span>${canRead ? 'Yes (privacy mode off)' : 'NO — disable via BotFather /setprivacy'}</span></div>
+          `;
+        } else {
+          card.innerHTML = `<div class="row"><span class="label">Status</span><span class="value bad"><span class="status-dot bad"></span>Token invalid</span></div><div class="row"><span class="label">Error</span><span class="value bad">${data.error}</span></div>`;
+        }
+      } catch (e) {
+        card.innerHTML = `<div class="value bad">Failed to load: ${e.message}</div>`;
+      }
+    }
+
+    async function refreshWebhook() {
+      const card = document.getElementById('webhook-card');
+      card.innerHTML = '<div class="value">Refreshing…</div>';
+      try {
+        const data = await fetchJSON('/api/debug/refresh-webhook', { method: 'POST' });
+        if (data.ok) {
+          alert('✓ Webhook refreshed!\n\nTelegram confirms URL: ' + data.telegram_confirms_url + '\nMatch: ' + data.match + '\nPending updates: ' + data.pending_updates);
+        } else {
+          alert('✗ Failed: ' + data.error);
+        }
+      } catch (e) {
+        alert('Failed: ' + e.message);
+      }
+      loadWebhook();
+    }
+
+    async function sendTest() {
+      try {
+        const data = await fetchJSON('/api/debug/test-message', { method: 'POST' });
+        if (data.ok) {
+          alert('✓ Test message sent to group ' + data.sent_to + '.\n\nIf it appears in Telegram, the bot can post. If commands still don\'t work, the issue is with receiving updates (webhook).');
+        } else {
+          alert('✗ Failed: ' + data.error);
+        }
+      } catch (e) {
+        alert('Failed: ' + e.message);
+      }
+    }
+
+    loadWebhook();
+    loadBotInfo();
+  </script>
+</body>
+</html>

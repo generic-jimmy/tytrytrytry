@@ -140,7 +140,10 @@ except Exception as e:
 section("5. API routes registered")
 try:
     from app.dashboard.api import router as api_router
-    paths = [r.path for r in api_router.routes]
+    from app.dashboard.routes import router as dashboard_router
+    # Combine both routers — debug endpoints live on dashboard_router,
+    # the rest on api_router (which is included into dashboard_router).
+    paths = [r.path for r in dashboard_router.routes]
     expected_paths = [
         "/api/groups",
         "/api/groups/{group_id}/overview",
@@ -169,17 +172,34 @@ try:
         "/api/groups/{group_id}/settings",
         "/api/groups/{group_id}/audit",
         "/api/groups/{group_id}/health",
+        "/api/debug/webhook",
+        "/api/debug/refresh-webhook",
+        "/api/debug/bot-info",
+        "/api/debug/test-message",
+        "/debug",
+        "/login",
+        "/app",
     ]
     for ep in expected_paths:
         if any(ep == p or ep.rstrip("/{action}") in p for p in paths):
             ok(f"endpoint {ep}")
         else:
-            # looser match
+            # looser match — check if the last path segment appears anywhere
             if any(ep.split("/")[-1] in p for p in paths):
                 ok(f"endpoint {ep} (loose match)")
             else:
                 fail(f"endpoint {ep} not found")
-    print(f"      (total routes: {len(paths)})")
+    print(f"      (total routes across both routers: {len(paths)})")
+
+    # Also check the app-level routes (webhook, health) that aren't on
+    # the dashboard router.
+    from app.main import app as fastapi_app
+    app_paths = [r.path for r in fastapi_app.routes if hasattr(r, "path")]
+    for ep in ["/webhook/{secret}", "/health", "/"]:
+        if any(ep in p for p in app_paths):
+            ok(f"app-level endpoint {ep}")
+        else:
+            fail(f"app-level endpoint {ep} not found")
 except Exception as e:
     fail("API routes", traceback.format_exc().strip().splitlines()[-1])
 
@@ -219,6 +239,8 @@ section("7. Frontend asset files")
 required_assets = [
     TEMPLATES / "index.html",
     TEMPLATES / "login.html",
+    TEMPLATES / "debug.html",
+    TEMPLATES / "dashboard.html",
     STATIC / "css" / "app.css",
     STATIC / "css" / "views.css",
     STATIC / "js" / "api.js",
