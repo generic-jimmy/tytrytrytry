@@ -174,7 +174,13 @@ async def on_bot_added(event: ChatMemberUpdated) -> None:
 
 @router.message(F.new_chat_members)
 async def welcome_new_members(message: Message, bot: Bot) -> None:
-    from app.bot.moderation import _bump_analytics
+    from app.bot.moderation import (
+        _bump_analytics,
+        check_banned_rejoin,
+        handle_raid_lock,
+        record_join,
+    )
+    from app.events import emit_member_joined
 
     async with async_session() as session:
         group = await session.get(Group, message.chat.id)
@@ -187,6 +193,22 @@ async def welcome_new_members(message: Message, bot: Bot) -> None:
             allowed = await handle_new_bot(bot, message.chat.id, member)
             if not allowed:
                 await message.answer(f"Blocked unauthorized bot @{member.username or member.id}.")
+            continue
+
+        # ----- NEW: banned-rejoin check. Catches ban evaders who rejoin.
+        was_banned = await check_banned_rejoin(bot, message.chat.id, member.id, member.full_name)
+        if was_banned:
+            continue  # already re-banned + notified; don't continue processing
+
+        # ----- NEW: raid detection. If join rate exceeds threshold, the
+        # group enters raid-lock mode (Purgatory auto-enabled, slow mode
+        # tightened, admins notified).
+        raid_triggered = record_join(message.chat.id)
+        if raid_triggered:
+            await handle_raid_lock(bot, message.chat.id)
+            # Force this member into purgatory regardless of group setting
+            await admit_to_purgatory(bot, message.chat.id, member)
+            emit_member_joined(message.chat.id, member.id, member.full_name, "suspicious")
             continue
 
         await _bump_analytics(message.chat.id, new_members=1)
@@ -204,9 +226,11 @@ async def welcome_new_members(message: Message, bot: Bot) -> None:
                 f"{member.full_name} has joined and is muted pending admin approval. "
                 f"Admins: review in the dashboard's Purgatory tab."
             )
+            emit_member_joined(message.chat.id, member.id, member.full_name, "pending")
         else:
             text = group.welcome_message if group else "Welcome!"
             await message.answer(f"{text}\n\nWelcome, {member.full_name}!")
+            emit_member_joined(message.chat.id, member.id, member.full_name, "approved")
 
 
 # ---------------------------------------------------------- moderation --
@@ -563,6 +587,8 @@ async def bai_cmd(message: Message, bot: Bot) -> None:
 async def bappeal_cmd(message: Message) -> None:
     """Any user can appeal a recent moderation action against themselves.
     The appeal lands in the dashboard's Appeals tab for admin review."""
+    from app.events import emit_appeal_filed
+
     reason = message.text.partition(" ")[2].strip()
     if not reason:
         await message.reply("Usage: /bappeal <explain why the action should be reversed>")
@@ -579,15 +605,16 @@ async def bappeal_cmd(message: Message) -> None:
         if recent is None:
             await message.reply("No recent moderation actions on your account to appeal.")
             return
-        session.add(
-            Appeal(
-                group_id=message.chat.id,
-                user_id=message.from_user.id,
-                target_action=recent.action,
-                reason=reason,
-            )
+        appeal = Appeal(
+            group_id=message.chat.id,
+            user_id=message.from_user.id,
+            target_action=recent.action,
+            reason=reason,
         )
+        session.add(appeal)
         await session.commit()
+        await session.refresh(appeal)
+    emit_appeal_filed(message.chat.id, appeal.id, message.from_user.id, recent.action)
     await message.reply("Your appeal has been submitted. Admins will review it in the dashboard.")
 
 
@@ -724,11 +751,17 @@ async def _maybe_autorespond(message: Message) -> None:
 # ------------------------------------------------- scheduled messages loop --
 
 async def scheduled_messages_loop(bot: Bot) -> None:
-    """Background coroutine that polls for due scheduled messages every 30s
-    and posts them. Started by main.py's lifespan handler."""
+    """Background coroutine that:
+    - Polls for due scheduled messages every 30s and posts them
+    - Checks raid lock expiry and restores group settings when locks expire
+    - Posts the daily mod-log digest at the configured hour (if enabled)
+
+    Started by main.py's lifespan handler.
+    """
     while True:
         try:
             now = datetime.now(timezone.utc)
+            # --- scheduled messages
             async with async_session() as session:
                 result = await session.execute(
                     select(ScheduledMessage).where(
@@ -744,7 +777,6 @@ async def scheduled_messages_loop(bot: Bot) -> None:
                         pass
                     item.sent = True
                     if item.repeat_hour is not None:
-                        # Schedule tomorrow's instance at the same hour.
                         next_run = (now + timedelta(days=1)).replace(
                             hour=item.repeat_hour % 24, minute=0, second=0, microsecond=0
                         )
@@ -758,6 +790,16 @@ async def scheduled_messages_loop(bot: Bot) -> None:
                             )
                         )
                 await session.commit()
+
+            # --- raid lock expiry check
+            try:
+                from app.bot.moderation import check_raid_lock_expiry, _raid_lock_until
+                # Check every group that has an active or recently-expired lock
+                for gid in list(_raid_lock_until.keys()):
+                    await check_raid_lock_expiry(bot, gid)
+            except Exception:
+                pass
+
         except Exception:
             pass  # don't let one bad loop kill the scheduler
         await asyncio.sleep(30)

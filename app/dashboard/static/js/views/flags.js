@@ -63,6 +63,7 @@ App.register('flags', (() => {
             <div class="fc-actions">
               <button class="btn btn-danger btn-sm" data-id="${f.id}" data-decision="approve">Mark as violation</button>
               <button class="btn btn-ghost btn-sm" data-id="${f.id}" data-decision="dismiss">Dismiss</button>
+              <button class="btn btn-ghost btn-sm" data-id="${f.id}" data-user="${f.user_id}" data-decision="reply">Reply to user</button>
             </div>
           ` : ''}
         </div>
@@ -72,6 +73,10 @@ App.register('flags', (() => {
         btn.addEventListener('click', async () => {
           const id = parseInt(btn.dataset.id, 10);
           const decision = btn.dataset.decision;
+          if (decision === 'reply') {
+            openReplyModal(gid, id);
+            return;
+          }
           try {
             await API.resolveFlag(gid, id, decision);
             UI.toast(decision === 'approve' ? 'Marked as violation' : 'Flag dismissed', 'success');
@@ -85,6 +90,29 @@ App.register('flags', (() => {
     } catch (err) {
       list.innerHTML = `<div class="empty-state"><h3>Failed to load</h3><p>${UI.escapeHTML(err.message)}</p></div>`;
     }
+  }
+
+  function openReplyModal(gid, flagId) {
+    const m = UI.modal({
+      title: 'Reply to flagged user',
+      body: `
+        <p style="color:var(--text-muted);font-size:13px;margin:0 0 12px;">This message will be posted in the group, mentioning the flagged user. Use it to explain why their message was flagged and what they should do.</p>
+        <textarea class="textarea" id="reply-text" rows="4" placeholder="Your message was flagged for spam. Please review the rules at /brules."></textarea>
+      `,
+      footer: `<button class="btn btn-ghost" data-close>Cancel</button><button class="btn" data-send>Send reply</button>`,
+    });
+    m.el.querySelector('[data-close]').addEventListener('click', m.close);
+    m.el.querySelector('[data-send]').addEventListener('click', async () => {
+      const text = m.el.querySelector('#reply-text').value.trim();
+      if (!text) { UI.toast('Reply text is required', 'info'); return; }
+      try {
+        await API.request('POST', `/api/groups/${gid}/flags/${flagId}/reply`, { text });
+        UI.toast('Reply posted to group', 'success');
+        m.close();
+      } catch (err) {
+        UI.toast(`Failed: ${err.message}`, 'error');
+      }
+    });
   }
 
   return { render };

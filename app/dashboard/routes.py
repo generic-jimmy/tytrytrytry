@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Request
+import asyncio
+
+from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -257,3 +259,234 @@ async def debug_test_message(request: Request, group_id: int = 0):
         return {"ok": True, "sent_to": target_gid}
     except Exception as exc:
         return {"ok": False, "error": str(exc), "error_type": type(exc).__name__, "group_id": target_gid}
+
+
+# --------------------------------------------------------------- websocket --
+# Live updates: dashboard connects to /api/ws?group_id=X and receives a
+# stream of moderation events in real-time. No more 60s polling.
+
+@router.websocket("/api/ws")
+async def websocket_endpoint(websocket):
+    """WebSocket endpoint for real-time dashboard updates.
+
+    Connect with: wss://yourdomain.com/api/ws?group_id=123
+    The connection is authenticated via the session cookie (same as the
+    rest of the dashboard — Telegram Login Widget sets the cookie).
+
+    On connect, the server replays the last 20 events for the group, then
+    pushes new events as they happen. The client can also send 'ping'
+    messages to keep the connection alive.
+    """
+    import logging
+    from starlette.websockets import WebSocketDisconnect
+    from app.events import subscribe, unsubscribe
+
+    log = logging.getLogger("telegram_bot.ws")
+    await websocket.accept()
+
+    # Read group_id from query string
+    query_params = dict(pair.split("=", 1) for pair in websocket.url_query.split("&") if "=" in pair) if websocket.url_query else {}
+    try:
+        group_id = int(query_params.get("group_id", "0"))
+    except ValueError:
+        group_id = 0
+    if group_id == 0:
+        await websocket.send_json({"type": "error", "payload": {"message": "Missing group_id"}})
+        await websocket.close()
+        return
+
+    # Authenticate via cookie
+    cookie_token = websocket.cookies.get(SESSION_COOKIE)
+    if not cookie_token:
+        await websocket.send_json({"type": "error", "payload": {"message": "Not authenticated"}})
+        await websocket.close()
+        return
+    uid = read_session_cookie(cookie_token)
+    if uid is None:
+        await websocket.send_json({"type": "error", "payload": {"message": "Session expired"}})
+        await websocket.close()
+        return
+
+    # Verify access to this group
+    async with async_session() as session:
+        result = await session.execute(
+            select(Admin).where(Admin.telegram_user_id == uid, Admin.group_id == group_id)
+        )
+        if result.first() is None:
+            await websocket.send_json({"type": "error", "payload": {"message": "No access to this group"}})
+            await websocket.close()
+            return
+
+    log.info("WebSocket connected: admin=%s group=%s", uid, group_id)
+
+    # Subscribe to events for this group
+    queue, recent_events = await subscribe(group_id)
+
+    # Replay recent events
+    for event in recent_events:
+        try:
+            await websocket.send_json(event)
+        except Exception:
+            break
+
+    # Listen for new events + handle pings
+    try:
+        while True:
+            # Wait for either an event to push OR a ping from the client
+            # (whichever comes first). Use asyncio.wait with FIRST_COMPLETED.
+            receive_task = asyncio.create_task(websocket.receive_text())
+            queue_task = asyncio.create_task(queue.get())
+            done, pending = await asyncio.wait(
+                [receive_task, queue_task],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+
+            if receive_task in done:
+                try:
+                    msg = receive_task.result()
+                    if msg == "ping":
+                        await websocket.send_json({"type": "pong"})
+                    elif msg == "close":
+                        break
+                except WebSocketDisconnect:
+                    break
+            if queue_task in done:
+                event = queue_task.result()
+                try:
+                    await websocket.send_json(event)
+                except Exception:
+                    break
+    except WebSocketDisconnect:
+        pass
+    except Exception:
+        log.exception("WebSocket error")
+    finally:
+        unsubscribe(group_id, queue)
+        log.info("WebSocket disconnected: admin=%s group=%s", uid, group_id)
+
+
+# ----------------------------------------------------- two-way dashboard chat --
+# Admins can post messages to the group from the dashboard — no need to
+# open Telegram. Useful for announcements, warnings, and replies to flagged
+# messages.
+
+@router.post("/api/groups/{group_id}/post")
+async def post_to_group(request: Request, group_id: int, payload: dict = Body(...)):
+    """Sends a message to the group from the dashboard. The admin's ID is
+    recorded as the sender for audit. Supports optional reply_to_message_id
+    for threaded replies."""
+    uid = await _current_admin(request)
+    await _assert_group_access(uid, group_id)
+    from app.bot import bot as tg_bot
+
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    reply_to = payload.get("reply_to_message_id")
+    try:
+        result = await tg_bot.send_message(
+            group_id,
+            text,
+            reply_to_message_id=int(reply_to) if reply_to else None,
+        )
+        await _audit(uid, group_id, "post_to_group", f"msg_id={result.message_id}")
+        return {"ok": True, "message_id": result.message_id}
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to send: {exc}")
+
+
+@router.post("/api/groups/{group_id}/flags/{flag_id}/reply")
+async def reply_to_flag(request: Request, group_id: int, flag_id: int, payload: dict = Body(...)):
+    """Posts a reply in the group referencing the flagged message's user.
+    Useful for: 'Your message was removed because X. Please review the rules.'"""
+    uid = await _current_admin(request)
+    await _assert_group_access(uid, group_id)
+    from app.bot import bot as tg_bot
+    from app.models import FlaggedMessage
+
+    text = str(payload.get("text", "")).strip()
+    if not text:
+        raise HTTPException(400, "text is required")
+    async with async_session() as session:
+        flag = await session.get(FlaggedMessage, flag_id)
+        if flag is None or flag.group_id != group_id:
+            raise HTTPException(404, "Flag not found")
+    try:
+        # Mention the user who was flagged
+        msg = await tg_bot.send_message(
+            group_id,
+            f"<a href=\"tg://user?id={flag.user_id}\">User</a>, {text}",
+        )
+        await _audit(uid, group_id, "reply_to_flag", f"flag_id={flag_id} msg_id={msg.message_id}")
+        return {"ok": True, "message_id": msg.message_id}
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to send: {exc}")
+
+
+@router.get("/api/groups/{group_id}/message-templates")
+async def list_templates(request: Request, group_id: int):
+    """Returns a list of canned message templates. Currently hardcoded —
+    a future upgrade could make these per-group editable."""
+    uid = await _current_admin(request)
+    await _assert_group_access(uid, group_id)
+    return {"templates": [
+        {"id": "rules_reminder", "title": "Rules reminder", "text": "📝 Friendly reminder: please review the group rules with /brules. Repeated violations may result in a mute or ban."},
+        {"id": "welcome", "title": "Welcome message", "text": "👋 Welcome to the group! Type /brules to see the rules, and feel free to introduce yourself."},
+        {"id": "offtopic_redirect", "title": "Move to offtopic", "text": "This conversation is drifting off-topic. Please move it to the appropriate thread or channel."},
+        {"id": "warn_notice", "title": "Warning notice", "text": "⚠️ This is a warning. Your recent message violated group rules. Please review /brules. If you believe this was an error, use /bappeal."},
+        {"id": "announcement_pin", "title": "Pinned announcement", "text": "📌 ANNOUNCEMENT: Please read the pinned messages for important group updates."},
+    ]}
+
+
+# ----------------------------------------------------- inline button callback --
+# Handles button presses on the rich log-channel embeds. Currently supports
+# "Undo" for warn/mute/ban actions.
+
+@router.post("/api/callback/undo")
+async def handle_undo_callback(request: Request, payload: dict = Body(...)):
+    """Handles the 'Undo' button on log channel entries. Reverses the
+    last action against a user — unmutes, unbans, or removes the last warn."""
+    uid = await _current_admin(request)
+    action = str(payload.get("action", ""))
+    target_user_id = int(payload.get("target_user_id", 0))
+    group_id = int(payload.get("group_id", 0))
+    if group_id == 0 or target_user_id == 0:
+        raise HTTPException(400, "Missing group_id or target_user_id")
+    await _assert_group_access(uid, group_id)
+    from app.bot import bot as tg_bot
+    from app.bot.moderation import unmute_user, _update_profile
+
+    try:
+        if "mute" in action:
+            await unmute_user(tg_bot, group_id, target_user_id)
+            await _audit(uid, group_id, "undo_mute", f"user={target_user_id}")
+        elif "ban" in action:
+            try:
+                await tg_bot.unban_chat_member(group_id, target_user_id)
+            except Exception:
+                pass
+            await _update_profile(group_id, target_user_id, is_banned=False)
+            await _audit(uid, group_id, "undo_ban", f"user={target_user_id}")
+        elif action == "warn":
+            # Remove the most recent warn for this user
+            from app.models import Warn
+            async with async_session() as session:
+                result = await session.execute(
+                    select(Warn).where(
+                        Warn.group_id == group_id, Warn.user_id == target_user_id
+                    ).order_by(Warn.created_at.desc()).limit(1)
+                )
+                warn = result.scalar_one_or_none()
+                if warn:
+                    await session.delete(warn)
+                    await session.commit()
+            await _audit(uid, group_id, "undo_warn", f"user={target_user_id}")
+        else:
+            raise HTTPException(400, f"Cannot undo action: {action}")
+        return {"ok": True}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(500, f"Undo failed: {exc}")

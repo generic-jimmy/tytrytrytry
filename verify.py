@@ -94,6 +94,7 @@ app_modules = [
     "app.db",
     "app.models",
     "app.auth",
+    "app.events",
     "app.main",
     "app.bot",
     "app.bot.handlers",
@@ -176,6 +177,11 @@ try:
         "/api/debug/refresh-webhook",
         "/api/debug/bot-info",
         "/api/debug/test-message",
+        "/api/groups/{group_id}/post",
+        "/api/groups/{group_id}/flags/{flag_id}/reply",
+        "/api/groups/{group_id}/message-templates",
+        "/api/callback/undo",
+        "/api/ws",
         "/debug",
         "/login",
         "/app",
@@ -245,6 +251,7 @@ required_assets = [
     STATIC / "css" / "views.css",
     STATIC / "js" / "api.js",
     STATIC / "js" / "ui.js",
+    STATIC / "js" / "ws.js",
     STATIC / "js" / "app.js",
     STATIC / "js" / "background.js",
     STATIC / "js" / "views" / "dashboard.js",
@@ -258,6 +265,7 @@ required_assets = [
     STATIC / "js" / "views" / "ai.js",
     STATIC / "js" / "views" / "automation.js",
     STATIC / "js" / "views" / "scheduled.js",
+    STATIC / "js" / "views" / "post.js",
     STATIC / "js" / "views" / "filters.js",
     STATIC / "js" / "views" / "settings.js",
     STATIC / "js" / "views" / "health.js",
@@ -494,6 +502,49 @@ try:
     asyncio.run(_test_migration_logic())
 except Exception as e:
     fail("migration logic test", traceback.format_exc().strip().splitlines()[-1])
+
+
+# ----------------------------------------------------------- 12. Events broker
+section("12. Events broker (WebSocket pub/sub)")
+
+async def _test_events_broker():
+    """Tests the in-process pub/sub broker: emit an event, verify a
+    subscriber receives it. Also tests recent-event replay on connect."""
+    from app.events import emit, subscribe, unsubscribe, emit_message_flagged
+
+    # Subscribe to group 999 (test group)
+    queue, recent = await subscribe(999)
+    ok("subscribe() returns queue + recent events")
+
+    # Emit an event
+    emit_message_flagged(999, 42, 123, "spam", "medium")
+    # Give the event loop a moment to deliver
+    await asyncio.sleep(0.05)
+    try:
+        event = queue.get_nowait()
+        assert event["type"] == "message_flagged"
+        assert event["payload"]["flag_id"] == 42
+        assert event["payload"]["category"] == "spam"
+        ok(f"emit_message_flagged() delivered: {event['type']}")
+    except asyncio.QueueEmpty:
+        fail("emit_message_flagged() did not deliver event to subscriber")
+
+    # Unsubscribe
+    unsubscribe(999, queue)
+    ok("unsubscribe() called without error")
+
+    # Verify recent events were buffered
+    queue2, recent2 = await subscribe(999)
+    if len(recent2) > 0:
+        ok(f"recent events replayed on reconnect: {len(recent2)} events")
+    else:
+        fail("recent events not replayed on reconnect")
+    unsubscribe(999, queue2)
+
+try:
+    asyncio.run(_test_events_broker())
+except Exception as e:
+    fail("events broker test", traceback.format_exc().strip().splitlines()[-1])
 
 # ----------------------------------------------------------- summary
 print(f"\n\033[1m{'='*60}\033[0m")

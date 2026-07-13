@@ -72,7 +72,105 @@ app.mount("/static", StaticFiles(directory="app/dashboard/static"), name="static
 
 @app.get("/health")
 async def health():
-    return {"status": "ok"}
+    """Expanded health check — verifies every external dependency the bot
+    relies on. Used by uptime monitors (UptimeRobot, BetterStack, etc.)
+    and the dashboard's System Health view.
+
+    Returns 503 if any critical dependency is down, 200 if all healthy."""
+    import time as _time
+    from app.db import engine
+    from sqlalchemy import text as sa_text
+
+    checks = {}
+    overall_ok = True
+
+    # --- Database
+    db_start = _time.monotonic()
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(sa_text("SELECT 1"))
+        checks["database"] = {
+            "ok": True,
+            "latency_ms": int((_time.monotonic() - db_start) * 1000),
+        }
+    except Exception as e:
+        checks["database"] = {"ok": False, "error": str(e)}
+        overall_ok = False
+
+    # --- Telegram API (bot.get_me — cheap call)
+    tg_start = _time.monotonic()
+    try:
+        me = await bot.get_me()
+        checks["telegram_api"] = {
+            "ok": True,
+            "latency_ms": int((_time.monotonic() - tg_start) * 1000),
+            "bot_username": me.username,
+        }
+    except Exception as e:
+        checks["telegram_api"] = {"ok": False, "error": str(e)}
+        overall_ok = False
+
+    # --- OpenRouter API (lightweight ping)
+    try:
+        from app.bot.openrouter import ping_openrouter
+        or_result = await ping_openrouter()
+        checks["openrouter"] = or_result
+        if not or_result.get("ok"):
+            overall_ok = False
+    except Exception as e:
+        checks["openrouter"] = {"ok": False, "error": str(e)}
+        # Don't mark overall as down for OpenRouter — moderation still
+        # works on regex filters, just no AI classification.
+        checks["openrouter"]["degraded_only"] = True
+
+    # --- Scheduled task liveness
+    try:
+        from app.bot.handlers import _scheduler_task
+        scheduler_alive = _scheduler_task is not None and not _scheduler_task.done()
+        checks["scheduler"] = {"ok": scheduler_alive, "task_alive": scheduler_alive}
+        if not scheduler_alive:
+            overall_ok = False
+    except Exception as e:
+        checks["scheduler"] = {"ok": False, "error": str(e)}
+        overall_ok = False
+
+    # --- Webhook registration status (cached from boot)
+    try:
+        info = await bot.get_webhook_info()
+        checks["webhook"] = {
+            "ok": bool(info.url),
+            "url": info.url,
+            "pending_updates": info.pending_update_count,
+            "last_error": info.last_error_message,
+        }
+        if not info.url or info.last_error_message:
+            # Don't fail overall health just for webhook warnings —
+            # surface them but stay 200 so the monitor doesn't flap.
+            checks["webhook"]["warning"] = True
+    except Exception as e:
+        checks["webhook"] = {"ok": False, "error": str(e)}
+
+    # --- System metrics
+    from app.bot.moderation import system_health
+    checks["system"] = system_health()
+
+    # --- WebSocket subscriber count
+    try:
+        from app.events import subscriber_count
+        checks["websockets"] = {"active_subscribers": subscriber_count(0)}  # 0 = sum all? actually per-group
+    except Exception:
+        pass
+
+    status_code = 200 if overall_ok else 503
+    from fastapi.responses import JSONResponse
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "status": "ok" if overall_ok else "degraded",
+            "checks": checks,
+            "timestamp": _time.time(),
+        },
+    )
 
 
 @app.get("/")

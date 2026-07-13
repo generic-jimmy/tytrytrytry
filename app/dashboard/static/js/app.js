@@ -111,8 +111,11 @@ const App = (() => {
     document.getElementById('group-avatar').textContent = UI.initials(g.title);
     document.getElementById('group-title').textContent = g.title;
     document.getElementById('group-subtitle').textContent = `ID: ${g.id}`;
+    // Connect WebSocket for real-time updates on this group
+    if (typeof WS !== 'undefined') {
+      WS.connect(g.id);
+    }
     router();
-    // Refresh badges for the new group
     refreshBadges();
   }
 
