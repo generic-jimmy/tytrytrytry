@@ -30,6 +30,7 @@ from app.models import (
     CustomCommand,
     Filter,
     Group,
+    ModLog,
     ScheduledMessage,
     UserProfile,
     Warn,
@@ -521,10 +522,14 @@ async def bsetwelcome_cmd(message: Message, bot: Bot) -> None:
 
     if arg.lower().startswith("ai "):
         prompt = arg[3:].strip()
-        generated = await admin_tool(
-            f"Write a short, friendly welcome message for new members of a Telegram group. "
-            f"Style/context: {prompt}. Keep it under 300 characters, no markdown."
-        )
+        try:
+            generated = await admin_tool(
+                f"Write a short, friendly welcome message for new members of a Telegram group. "
+                f"Style/context: {prompt}. Keep it under 300 characters, no markdown."
+            )
+        except RuntimeError as exc:
+            await message.reply(f"AI models are unavailable right now — try again shortly. ({exc})")
+            return
         new_text = generated.strip()
     else:
         new_text = arg
@@ -548,7 +553,11 @@ async def bsummarize_cmd(message: Message, bot: Bot) -> None:
     if not source:
         await message.reply("Reply to a message (or a pasted block of text) to summarize it.")
         return
-    summary = await admin_tool(f"Summarize this group chat excerpt in 3 short bullet points:\n\n{source}")
+    try:
+        summary = await admin_tool(f"Summarize this group chat excerpt in 3 short bullet points:\n\n{source}")
+    except RuntimeError as exc:
+        await message.reply(f"AI models are unavailable right now — try again shortly. ({exc})")
+        return
     await message.reply(summary)
 
 

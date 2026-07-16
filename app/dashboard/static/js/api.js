@@ -42,6 +42,7 @@ const API = (() => {
   return {
     setGroup,
     getGroup,
+    request,  // expose the raw request() for views that need custom endpoints
 
     listGroups: () => request('GET', '/api/groups'),
     overview: (gid) => request('GET', `/api/groups/${gid || groupId}/overview`),

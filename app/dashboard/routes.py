@@ -264,6 +264,41 @@ async def debug_test_message(request: Request, group_id: int = 0):
 # --------------------------------------------------------------- websocket --
 # Live updates: dashboard connects to /api/ws?group_id=X and receives a
 # stream of moderation events in real-time. No more 60s polling.
+#
+# IMPORTANT: WebSocket support depends on the hosting platform's proxy
+# passing the Upgrade header correctly. Render.com's free tier has been
+# known to break this. If the WS connection fails, the client transparently
+# falls back to long-polling /api/events below — same event stream, just
+# 2-second polling instead of push. Functionally equivalent for dashboard
+# refresh purposes.
+
+@router.get("/api/events")
+async def events_long_poll(request: Request, group_id: int, since: float = 0):
+    """Long-polling fallback for environments where WebSocket upgrade fails
+    (Render.com, some corporate proxies, etc.). Returns events newer than
+    the supplied `since` timestamp (Unix seconds). Client polls every 2s."""
+    uid = await _current_admin(request)
+    if uid is None:
+        raise HTTPException(401, "Not authenticated")
+    await _assert_group_access(uid, group_id)
+    from app.events import _recent_events, subscriber_count
+
+    # Filter recent events by timestamp
+    import datetime as _dt
+    events = []
+    for event in _recent_events.get(group_id, []):
+        try:
+            event_time = _dt.datetime.fromisoformat(event["timestamp"]).timestamp()
+            if event_time > since:
+                events.append(event)
+        except (KeyError, ValueError):
+            continue
+    return {
+        "events": events,
+        "server_time": _dt.datetime.now(_dt.timezone.utc).timestamp(),
+        "subscribers": subscriber_count(group_id),
+    }
+
 
 @router.websocket("/api/ws")
 async def websocket_endpoint(websocket):

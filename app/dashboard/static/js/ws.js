@@ -1,5 +1,9 @@
 // ============================================================
-// WebSocket client — real-time updates without polling
+// Real-time client — tries WebSocket, falls back to long-polling.
+// Many hosting platforms (Render.com, corporate proxies) break the
+// WebSocket Upgrade header. We detect that and transparently switch
+// to polling /api/events every 2s — same event stream, just pulled
+// instead of pushed.
 // ============================================================
 
 const WS = (() => {
@@ -8,30 +12,46 @@ const WS = (() => {
   let reconnectTimer = null;
   let pingTimer = null;
   let currentGroupId = null;
+  let fallbackPolling = false;
+  let pollTimer = null;
+  let lastEventTime = 0;
   const listeners = new Map(); // event_type -> Set<callback>
 
   function connect(groupId) {
-    if (currentGroupId === groupId && socket && socket.readyState === WebSocket.OPEN) return;
+    if (currentGroupId === groupId && (socket || fallbackPolling)) return;
     currentGroupId = groupId;
+    teardown();
+    if (fallbackPolling) {
+      startPolling();
+    } else {
+      tryConnect();
+    }
+  }
+
+  function teardown() {
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
+    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     if (socket) {
       try { socket.close(); } catch (e) {}
+      socket = null;
     }
+  }
 
+  function tryConnect() {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const url = `${proto}//${window.location.host}/api/ws?group_id=${groupId}`;
+    const url = `${proto}//${window.location.host}/api/ws?group_id=${currentGroupId}`;
     try {
       socket = new WebSocket(url);
     } catch (e) {
-      console.warn('WebSocket construction failed, falling back to polling', e);
-      scheduleReconnect();
+      console.warn('[WS] construction failed, switching to polling', e);
+      switchToPolling();
       return;
     }
 
     socket.onopen = () => {
       reconnectAttempts = 0;
-      console.log('[WS] connected to group', groupId);
-      // Send periodic pings to keep the connection alive (some load
-      // balancers/proxies close idle WS connections after 30-60s).
+      console.log('[WS] connected to group', currentGroupId);
       if (pingTimer) clearInterval(pingTimer);
       pingTimer = setInterval(() => {
         if (socket && socket.readyState === WebSocket.OPEN) {
@@ -61,6 +81,14 @@ const WS = (() => {
     socket.onclose = () => {
       console.log('[WS] disconnected');
       if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
+      socket = null;
+      // After 2 failed attempts, assume the platform doesn't support WS
+      // (Render.com, some proxies) and switch to long-polling permanently.
+      if (reconnectAttempts >= 1 && !fallbackPolling) {
+        console.log('[WS] switching to long-polling fallback (WS unsupported by host)');
+        switchToPolling();
+        return;
+      }
       scheduleReconnect();
     };
   }
@@ -68,25 +96,54 @@ const WS = (() => {
   function scheduleReconnect() {
     if (reconnectTimer) clearTimeout(reconnectTimer);
     reconnectAttempts++;
-    if (reconnectAttempts > 10) {
-      console.warn('[WS] giving up after 10 attempts — falling back to polling');
+    if (reconnectAttempts > 5) {
+      console.warn('[WS] giving up after 5 attempts — switching to polling');
+      switchToPolling();
       return;
     }
     const delay = Math.min(30000, 1000 * Math.pow(2, reconnectAttempts));
     console.log(`[WS] reconnecting in ${delay}ms (attempt ${reconnectAttempts})`);
     reconnectTimer = setTimeout(() => {
-      if (currentGroupId) connect(currentGroupId);
+      if (currentGroupId) tryConnect();
     }, delay);
+  }
+
+  function switchToPolling() {
+    fallbackPolling = true;
+    teardown();
+    startPolling();
+  }
+
+  function startPolling() {
+    if (pollTimer) clearInterval(pollTimer);
+    console.log('[WS] polling /api/events every 2s for group', currentGroupId);
+    // Initial fetch immediately
+    pollOnce();
+    pollTimer = setInterval(pollOnce, 2000);
+  }
+
+  async function pollOnce() {
+    if (!currentGroupId) return;
+    try {
+      const res = await fetch(`/api/events?group_id=${currentGroupId}&since=${lastEventTime}`, {
+        credentials: 'include',
+      });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (data.server_time) lastEventTime = data.server_time;
+      if (data.events && data.events.length > 0) {
+        data.events.forEach((event) => handleEvent(event));
+      }
+    } catch (e) {
+      // silent — next poll will retry
+    }
   }
 
   function disconnect() {
     currentGroupId = null;
-    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null; }
-    if (pingTimer) { clearInterval(pingTimer); pingTimer = null; }
-    if (socket) {
-      try { socket.close(); } catch (e) {}
-      socket = null;
-    }
+    teardown();
+    fallbackPolling = false;
+    reconnectAttempts = 0;
   }
 
   function on(eventType, callback) {
@@ -100,6 +157,12 @@ const WS = (() => {
 
   function handleEvent(event) {
     const { type, payload } = event;
+    // Update timestamp watermark so polling doesn't replay old events
+    if (event.timestamp) {
+      try {
+        lastEventTime = Math.max(lastEventTime, new Date(event.timestamp).getTime() / 1000);
+      } catch (e) {}
+    }
     // Built-in handlers — update badges + toast for common events
     if (type === 'member_joined') {
       UI.toast(`👋 ${payload.full_name} joined the group`, 'info', 3000);
@@ -114,7 +177,6 @@ const WS = (() => {
       UI.toast(`Purgatory: ${payload.decision} user ${payload.user_id}`, 'info', 3000);
       App.refreshBadges();
     } else if (type === 'mod_action') {
-      // Subtle toast for mod actions — only show if not on the modlog page
       if (!window.location.hash.includes('modlog')) {
         UI.toast(`${payload.action}: ${payload.reason || ''}`, 'info', 2500);
       }
@@ -133,7 +195,6 @@ const WS = (() => {
         try { cb(payload); } catch (e) { console.warn('[WS] listener error:', e); }
       });
     }
-    // Also fire to '*' wildcard listeners
     if (listeners.has('*')) {
       listeners.get('*').forEach((cb) => {
         try { cb(event); } catch (e) { console.warn('[WS] wildcard listener error:', e); }
@@ -141,5 +202,8 @@ const WS = (() => {
     }
   }
 
-  return { connect, disconnect, on, off };
+  return {
+    connect, disconnect, on, off,
+    isPolling: () => fallbackPolling,
+  };
 })();

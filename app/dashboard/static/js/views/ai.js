@@ -32,11 +32,15 @@ App.register('ai', (() => {
           <h3>Model & Behavior</h3>
 
           <div class="field">
-            <label class="label">Model</label>
-            <select class="select" id="ai-model">
-              ${cfg.available_models.map((m) => `<option value="${m.value}" ${m.value === cfg.model ? 'selected' : ''}>${UI.escapeHTML(m.label)}</option>`).join('')}
-            </select>
-            <small class="text-muted" style="font-size:11px;display:block;margin-top:4px;">Free models from OpenRouter. Falls back through the list if the chosen model is unavailable.</small>
+            <label class="label">Model <span class="hint-inline">type or pick — polls ALL free models as fallback</span></label>
+            <input class="input" id="ai-model" list="ai-model-list" value="${UI.escapeAttr(cfg.model)}" placeholder="e.g. meta-llama/llama-3.3-70b-instruct:free" autocomplete="off" spellcheck="false" style="font-family:var(--font-mono);font-size:12px;">
+            <datalist id="ai-model-list">
+              ${cfg.available_models.map((m) => `<option value="${m.value}">${UI.escapeHTML(m.label)}</option>`).join('')}
+            </datalist>
+            <small class="text-muted" style="font-size:11px;display:block;margin-top:4px;">
+              Pick from the dropdown or type any OpenRouter model ID (e.g. <code>anthropic/claude-3.5-sonnet</code> for paid models).
+              Use <code>__all_free__</code> to poll through every free model until one works. Falls back through the full free list automatically on any failure.
+            </small>
           </div>
 
           <div class="field">

@@ -182,6 +182,7 @@ try:
         "/api/groups/{group_id}/message-templates",
         "/api/callback/undo",
         "/api/ws",
+        "/api/events",
         "/debug",
         "/login",
         "/app",
