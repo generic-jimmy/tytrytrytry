@@ -139,12 +139,33 @@ except Exception as e:
 
 # ----------------------------------------------------------- 5. API routes
 section("5. API routes registered")
+
+
+def _flatten_paths(routes) -> list[str]:
+    """Recursively collects route paths. Newer FastAPI versions wrap an
+    include_router()'d sub-router in an internal `_IncludedRouter` proxy
+    that doesn't expose `.path` directly — it exposes the real router via
+    `.original_router`, which has the actual `.routes` list. This walks
+    both the flat (older) and wrapped (newer) representations so the check
+    doesn't break again on the next FastAPI upgrade."""
+    paths = []
+    for r in routes:
+        path = getattr(r, "path", None)
+        if path is not None:
+            paths.append(path)
+            continue
+        inner = getattr(r, "original_router", None)
+        if inner is not None and hasattr(inner, "routes"):
+            paths.extend(_flatten_paths(inner.routes))
+    return paths
+
+
 try:
     from app.dashboard.api import router as api_router
     from app.dashboard.routes import router as dashboard_router
     # Combine both routers — debug endpoints live on dashboard_router,
     # the rest on api_router (which is included into dashboard_router).
-    paths = [r.path for r in dashboard_router.routes]
+    paths = _flatten_paths(dashboard_router.routes)
     expected_paths = [
         "/api/groups",
         "/api/groups/{group_id}/overview",
@@ -201,7 +222,7 @@ try:
     # Also check the app-level routes (webhook, health) that aren't on
     # the dashboard router.
     from app.main import app as fastapi_app
-    app_paths = [r.path for r in fastapi_app.routes if hasattr(r, "path")]
+    app_paths = _flatten_paths(fastapi_app.routes)
     for ep in ["/webhook/{secret}", "/health", "/"]:
         if any(ep in p for p in app_paths):
             ok(f"app-level endpoint {ep}")

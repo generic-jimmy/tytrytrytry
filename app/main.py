@@ -156,8 +156,8 @@ async def health():
 
     # --- WebSocket subscriber count
     try:
-        from app.events import subscriber_count
-        checks["websockets"] = {"active_subscribers": subscriber_count(0)}  # 0 = sum all? actually per-group
+        from app.events import total_subscriber_count
+        checks["websockets"] = {"active_subscribers": total_subscriber_count()}
     except Exception:
         pass
 

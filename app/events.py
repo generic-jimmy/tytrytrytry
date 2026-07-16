@@ -90,6 +90,14 @@ def subscriber_count(group_id: int) -> int:
     return len(_subscribers.get(group_id, set()))
 
 
+def total_subscriber_count() -> int:
+    """Sum of connected WebSocket subscribers across every group — what the
+    /health endpoint actually wants, as opposed to subscriber_count(0),
+    which only ever checked a group literally ID'd 0 (never a real
+    Telegram chat) and so always read zero regardless of real traffic."""
+    return sum(len(subs) for subs in _subscribers.values())
+
+
 # --------------------------------------------------------- convenience helpers
 
 def emit_member_joined(group_id: int, user_id: int, full_name: str, status: str) -> None:

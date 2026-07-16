@@ -1,7 +1,8 @@
 fastapi
 uvicorn
+websockets
 aiogram
-sqlalchemy
+sqlalchemy[asyncio]
 asyncpg
 pydantic-settings
 httpx
